@@ -295,7 +295,7 @@ def set_gpu_prefill_frequency(handle, rank_print):
 
 def set_gpu_decode_frequency(handle, rank_print):
     try:
-        pynvml.nvmlDeviceSetClocks(handle, 800, 800)
+        pynvml.nvmlDeviceSetGpuLockedClocks(handle, 800, 800)
         print(f"Successfully set GPU frequency to 800 MHz")
     except pynvml.NVMLError as e:
         rank_print(f"Failed to set GPU frequency: {e}")
