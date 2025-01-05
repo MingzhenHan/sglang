@@ -49,6 +49,8 @@ import logging
 import multiprocessing
 import os
 import time
+import pynvml
+import threading
 from typing import Tuple
 
 import numpy as np
@@ -76,6 +78,7 @@ class BenchArgs:
     correctness_test: bool = False
     # This is only used for correctness test
     cut_len: int = 4
+    dvfs: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -94,6 +97,7 @@ class BenchArgs:
         )
         parser.add_argument("--correctness-test", action="store_true")
         parser.add_argument("--cut-len", type=int, default=BenchArgs.cut_len)
+        parser.add_argument("--dvfs", action="store_true", default=False)
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -282,9 +286,22 @@ def correctness_test(
 def synchronize(device):
     torch.get_device_module(device).synchronize()
 
+def set_gpu_prefill_frequency(handle, rank_print):
+    try:
+        pynvml.nvmlDeviceSetGpuLockedClocks(handle, 1600, 1600)
+        print(f"Successfully set GPU frequency to xxx MHz")
+    except pynvml.NVMLError as e:
+        rank_print(f"Failed to set GPU frequency: {e}")
+
+def set_gpu_decode_frequency(handle, rank_print):
+    try:
+        pynvml.nvmlDeviceSetClocks(handle, 800, 800)
+        print(f"Successfully set GPU frequency to 800 MHz")
+    except pynvml.NVMLError as e:
+        rank_print(f"Failed to set GPU frequency: {e}")
 
 def latency_test_run_once(
-    run_name, model_runner, rank_print, reqs, batch_size, input_len, output_len, device
+    run_name, model_runner, rank_print, reqs, batch_size, input_len, output_len, device, dvfs
 ):
     max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
     if batch_size > max_batch_size:
@@ -292,6 +309,12 @@ def latency_test_run_once(
             f"skipping ({batch_size}, {input_len}, {output_len}) due to max batch size limit"
         )
         return
+    
+    # Initialize NVML
+    pynvml.nvmlInit()
+    # Get the handle for the first GPU (assuming single GPU for simplicity)
+    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
 
     # Clear the pools.
     model_runner.req_to_token_pool.clear()
@@ -309,14 +332,28 @@ def latency_test_run_once(
     # Prefill
     synchronize(device)
     tic = time.time()
+
+    if dvfs:
+        gpu_thread = threading.Thread(target=set_gpu_prefill_frequency, args=(handle, rank_print))
+        gpu_thread.start()
+
+    tic2 = time.time() 
     next_token_ids, _, batch = extend(reqs, model_runner)
+    tic3 = time.time() 
     synchronize(device)
+    tic4 = time.time()
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
     throughput = input_len * batch_size / prefill_latency
     rank_print(
         f"Prefill. latency: {prefill_latency:6.5f} s, throughput: {throughput:9.2f} token/s"
     )
+    dvfs_latency = tic2 - tic
+
+    if dvfs:
+        rank_print(
+            f"DVFS. latency: {dvfs_latency:6.5f} s"
+        )
     measurement_results["prefill_latency"] = prefill_latency
     measurement_results["prefill_throughput"] = throughput
 
@@ -325,16 +362,33 @@ def latency_test_run_once(
     for i in range(output_len - 1):
         synchronize(device)
         tic = time.time()
+
+        if dvfs:
+            gpu_thread = threading.Thread(target=set_gpu_prefill_frequency, args=(handle, rank_print))
+            gpu_thread.start()
+
+        tic2 = time.time()
         next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        tic3 = time.time()
         synchronize(device)
+        tic4 = time.time()
         latency = time.time() - tic
         tot_latency += latency
         throughput = batch_size / latency
         decode_latencies.append(latency)
-        if i < 5:
+        # if i < 5:
+        #     rank_print(
+        #         f"Decode.  latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
+        #     )
+        rank_print(
+            f"Decode.  latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
+        )
+        dvfs_latency = tic2 - tic
+        if dvfs:
             rank_print(
-                f"Decode.  latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
+                f"DVFS. latency: {dvfs_latency:6.5f} s"
             )
+        
 
     # Record decode timing from 2nd output
     if output_len > 1:
@@ -384,6 +438,7 @@ def latency_test(
         bench_args.input_len[0],
         8,  # shorter decoding to speed up the warmup
         server_args.device,
+        bench_args.dvfs,
     )
 
     rank_print("Benchmark ...")
@@ -403,6 +458,7 @@ def latency_test(
             il,
             ol,
             server_args.device,
+            bench_args.dvfs,
         )
         if ret is not None:
             result_list.append(ret)
