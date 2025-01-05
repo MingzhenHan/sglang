@@ -51,6 +51,7 @@ import os
 import time
 import pynvml
 import threading
+import random
 from typing import Tuple
 
 import numpy as np
@@ -300,6 +301,15 @@ def set_gpu_decode_frequency(handle, rank_print):
     except pynvml.NVMLError as e:
         rank_print(f"Failed to set GPU frequency: {e}")
 
+def set_gpu_frequency_random(handle, rank_print):
+    try:
+        frequencies = [210, 480, 810, 1080, 1200, 1440, 1695]
+        selected_frequency = random.choice(frequencies)
+        pynvml.nvmlDeviceSetGpuLockedClocks(handle, selected_frequency, selected_frequency)
+        print(f"Successfully set GPU frequency to {selected_frequency} MHz")
+    except pynvml.NVMLError as e:
+        rank_print(f"Failed to set GPU frequency: {e}")
+
 def latency_test_run_once(
     run_name, model_runner, rank_print, reqs, batch_size, input_len, output_len, device, dvfs
 ):
@@ -314,6 +324,7 @@ def latency_test_run_once(
     pynvml.nvmlInit()
     # Get the handle for the first GPU (assuming single GPU for simplicity)
     handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    start_energy = pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)
 
 
     # Clear the pools.
@@ -330,11 +341,12 @@ def latency_test_run_once(
     tot_latency = 0
 
     # Prefill
-    synchronize(device)
     tic = time.time()
+    synchronize(device)
+    tic1 = time.time()
 
     if dvfs:
-        gpu_thread = threading.Thread(target=set_gpu_prefill_frequency, args=(handle, rank_print))
+        gpu_thread = threading.Thread(target=set_gpu_frequency_random, args=(handle, rank_print))
         gpu_thread.start()
 
     tic2 = time.time() 
@@ -348,7 +360,7 @@ def latency_test_run_once(
     rank_print(
         f"Prefill. latency: {prefill_latency:6.5f} s, throughput: {throughput:9.2f} token/s"
     )
-    dvfs_latency = tic2 - tic
+    dvfs_latency = tic2 - tic1
 
     if dvfs:
         rank_print(
@@ -360,11 +372,12 @@ def latency_test_run_once(
     # Decode
     decode_latencies = []
     for i in range(output_len - 1):
-        synchronize(device)
         tic = time.time()
+        synchronize(device)
+        tic1 = time.time()
 
         if dvfs:
-            gpu_thread = threading.Thread(target=set_gpu_decode_frequency, args=(handle, rank_print))
+            gpu_thread = threading.Thread(target=set_gpu_frequency_random, args=(handle, rank_print))
             gpu_thread.start()
 
         tic2 = time.time()
@@ -383,11 +396,14 @@ def latency_test_run_once(
         rank_print(
             f"Decode.  latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
         )
-        dvfs_latency = tic2 - tic
+        dvfs_latency = tic2 - tic1
         if dvfs:
             rank_print(
                 f"DVFS. latency: {dvfs_latency:6.5f} s"
             )
+    
+    end_energy = pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+    rank_print(f"Energy: {end_energy - start_energy:6.5f} mJ")
         
 
     # Record decode timing from 2nd output
@@ -449,6 +465,7 @@ def latency_test(
         bench_args.batch_size, bench_args.input_len, bench_args.output_len
     ):
         reqs = prepare_synthetic_inputs_for_latency_test(bs, il)
+        
         ret = latency_test_run_once(
             bench_args.run_name,
             model_runner,
