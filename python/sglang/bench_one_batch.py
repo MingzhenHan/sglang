@@ -289,7 +289,7 @@ def synchronize(device):
 def set_gpu_prefill_frequency(handle, rank_print):
     try:
         pynvml.nvmlDeviceSetGpuLockedClocks(handle, 1600, 1600)
-        print(f"Successfully set GPU frequency to xxx MHz")
+        print(f"Successfully set GPU frequency to 1600 MHz")
     except pynvml.NVMLError as e:
         rank_print(f"Failed to set GPU frequency: {e}")
 
@@ -364,7 +364,7 @@ def latency_test_run_once(
         tic = time.time()
 
         if dvfs:
-            gpu_thread = threading.Thread(target=set_gpu_prefill_frequency, args=(handle, rank_print))
+            gpu_thread = threading.Thread(target=set_gpu_decode_frequency, args=(handle, rank_print))
             gpu_thread.start()
 
         tic2 = time.time()
